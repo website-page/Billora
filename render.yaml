@@ -7,7 +7,25 @@ services:
     envVars:
       - key: JWT_SECRET
         sync: false
+      - key: DATABASE_URL
+        sync: false
       - key: FLW_SECRET_KEY
+        sync: false
+      - key: FLW_PUBLIC_KEY
+        sync: false
+      - key: FLW_SECRET_HASH
+        sync: false
+      - key: BILLORA_PRO_AMOUNT
+        value: "4500"
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        value: "587"
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: SMTP_FROM
         sync: false
       - key: APP_URL
         sync: false
