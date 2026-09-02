@@ -1,19 +1,25 @@
 # Billora
 
-**Billora** is a premium full-stack invoicing and business-management starter for Nigerian SMEs.
+**Billora** is a premium full-stack invoicing and business-management SaaS starter for Nigerian SMEs.
 
-## Included
+## Phase 2 included
 
-- Email/password registration and login
-- Secure server-side JWT authentication
-- Dashboard with revenue, outstanding invoices, expenses and profit
-- Invoice creation with multiple line items
-- Invoice status tracking
-- Expense tracking
-- Customer list generated from invoice activity
-- Responsive mobile-first UI with motion effects
-- Flutterwave subscription checkout endpoint
-- Environment-based secrets — no payment secret is stored in the frontend
+- Email/password registration and JWT authentication
+- Revenue, outstanding, expenses and net-profit dashboard
+- Animated 7-day cash-flow chart
+- Professional invoice creation with multiple line items
+- One-click invoice PDF generation
+- One-click payment receipt PDF generation
+- Invoice status tracking: paid, unpaid, overdue
+- Customer workspace generated from invoice activity
+- Six-month revenue vs expense analytics
+- Invoice health and top-customer analytics
+- Business profile/settings used by generated documents
+- NGN/USD/GBP currency preference
+- Light/dark mode
+- Responsive mobile dashboard
+- Flutterwave Pro subscription checkout + return verification flow
+- Environment-based secrets; payment secrets are never stored in frontend code
 
 ## Run locally
 
@@ -25,18 +31,20 @@ npm start
 
 Open `http://localhost:3000`.
 
-## Flutterwave setup
+## Flutterwave
 
-Add your Flutterwave secret key to the server environment as `FLW_SECRET_KEY`. Never put the secret key in `public/app.js`, HTML, GitHub source, or a client-side environment variable.
+Add your Flutterwave secret key privately as `FLW_SECRET_KEY`. Never put the secret key in HTML, `public/app.js`, GitHub source, or any client-side environment variable.
 
-Set `APP_URL` to the deployed Billora URL so Flutterwave can return the customer to the application after checkout.
-
-The current starter uses a ₦4,500/month Pro checkout. Change the amount in `server.js` when the final pricing is decided.
+Set `APP_URL` to the deployed Billora URL. The current starter uses a ₦4,500/month Pro checkout; change the amount in `server.js` when final pricing is decided.
 
 ## Deployment
 
-The included `render.yaml` is prepared for a Node web service. Add `JWT_SECRET`, `FLW_SECRET_KEY`, and `APP_URL` as private environment variables in the hosting dashboard.
+The included `render.yaml` is prepared for a Node web service. Add `JWT_SECRET`, `FLW_SECRET_KEY`, and `APP_URL` as private environment variables in your hosting dashboard.
 
-## Important production upgrades
+## Production database note
 
-Before taking real customer payments, add a persistent database (PostgreSQL recommended), server-side Flutterwave webhook handling, transaction verification tied to the authenticated user and transaction reference, rate limiting, CSRF/security headers, audit logs, invoice PDF generation, email delivery, backups, and proper error monitoring.
+The current starter intentionally keeps the simple JSON data store so the project is easy to run immediately. For a real commercial launch, migrate user/business data to PostgreSQL and add backups, rate limiting, security headers, audit logging, email delivery, persistent file storage, and server-side Flutterwave webhook processing.
+
+## Next phase
+
+Stock/inventory management, recurring invoices, customer reminders, email delivery, team roles, tax/VAT fields, richer reports, and a dedicated marketing/landing page can be layered on top of this foundation.
