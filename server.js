@@ -1,89 +1,28 @@
-const express = require('express');
-const fs = require('fs');
-const path = require('path');
-const bcrypt = require('bcryptjs');
-const jwt = require('jsonwebtoken');
-
-const app = express();
-const PORT = process.env.PORT || 3000;
-const APP_URL = process.env.APP_URL || `http://localhost:${PORT}`;
-const JWT_SECRET = process.env.JWT_SECRET || 'change-me-in-production';
-const DATA_FILE = path.join(__dirname, 'billora-data.json');
-
-app.use(express.json({ limit: '1mb' }));
-app.use(express.static(path.join(__dirname, 'public')));
-
-function loadData() {
-  if (!fs.existsSync(DATA_FILE)) return { users: [], invoices: [], expenses: [] };
-  try { return JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); }
-  catch { return { users: [], invoices: [], expenses: [] }; }
-}
-function saveData(data) { fs.writeFileSync(DATA_FILE, JSON.stringify(data, null, 2)); }
-function id(prefix) { return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`; }
-function tokenFor(user) { return jwt.sign({ id: user.id, email: user.email }, JWT_SECRET, { expiresIn: '7d' }); }
-function auth(req, res, next) {
-  const header = req.headers.authorization || '';
-  const token = header.startsWith('Bearer ') ? header.slice(7) : null;
-  if (!token) return res.status(401).json({ message: 'Authentication required.' });
-  try { req.user = jwt.verify(token, JWT_SECRET); next(); }
-  catch { return res.status(401).json({ message: 'Session expired. Please log in again.' }); }
-}
-function publicUser(u) { return { id:u.id,name:u.name,email:u.email,businessName:u.businessName,plan:u.plan,createdAt:u.createdAt }; }
-
-app.get('/api/health', (req,res)=>res.json({ok:true,app:'Billora',version:'2.0.0'}));
-
-app.post('/api/auth/register', async (req,res)=>{
-  const {name,email,password,businessName}=req.body||{};
-  if(!name||!email||!password)return res.status(400).json({message:'Name, email and password are required.'});
-  if(String(password).length<6)return res.status(400).json({message:'Password must be at least 6 characters.'});
-  const data=loadData(), normalized=String(email).trim().toLowerCase();
-  if(data.users.some(u=>u.email===normalized))return res.status(409).json({message:'An account with that email already exists.'});
-  const user={id:id('usr'),name:String(name).trim(),email:normalized,businessName:String(businessName||`${name}'s Business`).trim(),password:await bcrypt.hash(password,10),plan:'free',createdAt:new Date().toISOString()};
-  data.users.push(user);saveData(data);res.status(201).json({token:tokenFor(user),user:publicUser(user)});
-});
-
-app.post('/api/auth/login',async(req,res)=>{
-  const {email,password}=req.body||{},data=loadData();
-  const user=data.users.find(u=>u.email===String(email||'').trim().toLowerCase());
-  if(!user||!(await bcrypt.compare(password||'',user.password)))return res.status(401).json({message:'Invalid email or password.'});
-  res.json({token:tokenFor(user),user:publicUser(user)});
-});
-
-app.get('/api/me',auth,(req,res)=>{const user=loadData().users.find(u=>u.id===req.user.id);if(!user)return res.status(404).json({message:'User not found.'});res.json(publicUser(user));});
-
-app.get('/api/dashboard',auth,(req,res)=>{
-  const data=loadData(), invoices=data.invoices.filter(x=>x.userId===req.user.id), expenses=data.expenses.filter(x=>x.userId===req.user.id);
-  const revenue=invoices.filter(x=>x.status==='paid').reduce((s,x)=>s+Number(x.total||0),0),pending=invoices.filter(x=>x.status!=='paid').reduce((s,x)=>s+Number(x.total||0),0),costs=expenses.reduce((s,x)=>s+Number(x.amount||0),0);
-  const monthly=Array.from({length:7},(_,i)=>({label:new Date(Date.now()-((6-i)*86400000)).toLocaleDateString('en-NG',{weekday:'short'}),revenue:0,expense:0}));
-  invoices.forEach(x=>{const d=new Date(x.createdAt);const idx=Math.round((Date.now()-new Date(d.getFullYear(),d.getMonth(),d.getDate()).getTime())/86400000);if(idx>=0&&idx<7&&x.status==='paid')monthly[6-idx].revenue+=Number(x.total||0);});
-  expenses.forEach(x=>{const d=new Date(x.createdAt);const idx=Math.round((Date.now()-new Date(d.getFullYear(),d.getMonth(),d.getDate()).getTime())/86400000);if(idx>=0&&idx<7)monthly[6-idx].expense+=Number(x.amount||0);});
-  res.json({revenue,pending,expenses:costs,profit:revenue-costs,invoiceCount:invoices.length,invoices:invoices.slice(-8).reverse(),series:monthly});
-});
-
-app.get('/api/invoices',auth,(req,res)=>res.json(loadData().invoices.filter(x=>x.userId===req.user.id).reverse()));
-app.post('/api/invoices',auth,(req,res)=>{
-  const {customerName,customerEmail,items,dueDate,notes}=req.body||{};
-  if(!customerName||!Array.isArray(items)||!items.length)return res.status(400).json({message:'Customer and at least one item are required.'});
-  const cleanItems=items.map(i=>({description:String(i.description||'Item').trim(),quantity:Math.max(1,Number(i.quantity)||1),price:Math.max(0,Number(i.price)||0)}));
-  if(cleanItems.some(i=>!i.description||i.price<=0))return res.status(400).json({message:'Each item needs a description and price.'});
-  const subtotal=cleanItems.reduce((s,i)=>s+i.quantity*i.price,0), invoice={id:id('inv'),userId:req.user.id,number:`INV-${String(Date.now()).slice(-7)}`,customerName:String(customerName).trim(),customerEmail:String(customerEmail||'').trim(),items:cleanItems,subtotal,total:subtotal,status:'unpaid',dueDate:dueDate||'',notes:String(notes||''),createdAt:new Date().toISOString()};
-  const data=loadData();data.invoices.push(invoice);saveData(data);res.status(201).json(invoice);
-});
-app.patch('/api/invoices/:id',auth,(req,res)=>{const data=loadData(),invoice=data.invoices.find(x=>x.id===req.params.id&&x.userId===req.user.id);if(!invoice)return res.status(404).json({message:'Invoice not found.'});if(req.body.status&&['paid','unpaid','overdue'].includes(req.body.status))invoice.status=req.body.status;saveData(data);res.json(invoice);});
-app.get('/api/expenses',auth,(req,res)=>res.json(loadData().expenses.filter(x=>x.userId===req.user.id).reverse()));
-app.post('/api/expenses',auth,(req,res)=>{const {title,amount,category}=req.body||{};if(!title||!Number(amount))return res.status(400).json({message:'Expense title and amount are required.'});const data=loadData(),expense={id:id('exp'),userId:req.user.id,title:String(title).trim(),amount:Number(amount),category:String(category||'General'),createdAt:new Date().toISOString()};data.expenses.push(expense);saveData(data);res.status(201).json(expense);});
-
-app.post('/api/payments/subscribe',auth,async(req,res)=>{
-  const secret=process.env.FLW_SECRET_KEY;if(!secret)return res.status(503).json({message:'Flutterwave is not configured yet. Add FLW_SECRET_KEY to the server environment.'});
-  const amount=4500,data=loadData(),user=data.users.find(u=>u.id===req.user.id),tx_ref=`BILLORA-${user.id}-${Date.now()}`;
-  try{const response=await fetch('https://api.flutterwave.com/v3/payments',{method:'POST',headers:{Authorization:`Bearer ${secret}`,'Content-Type':'application/json'},body:JSON.stringify({tx_ref,amount,currency:'NGN',redirect_url:`${APP_URL}/?payment=complete&tx_ref=${encodeURIComponent(tx_ref)}`,payment_options:'card,banktransfer,ussd',customer:{email:user.email,name:user.name},customizations:{title:'Billora Pro',description:'Billora monthly Pro subscription'}})});const result=await response.json();if(!response.ok||result.status!=='success')return res.status(502).json({message:result.message||'Unable to start payment.'});res.json({link:result.data.link,tx_ref});}catch{res.status(502).json({message:'Flutterwave could not be reached right now.'});}
-});
-app.get('/api/payments/verify/:txRef',auth,async(req,res)=>{
-  const secret=process.env.FLW_SECRET_KEY;if(!secret)return res.status(503).json({message:'Flutterwave is not configured.'});
-  try{const r=await fetch(`https://api.flutterwave.com/v3/transactions/verify_by_reference?tx_ref=${encodeURIComponent(req.params.txRef)}`,{headers:{Authorization:`Bearer ${secret}`}}),result=await r.json(),paid=result.status==='success'&&result.data?.status==='successful'&&result.data?.currency==='NGN'&&Number(result.data?.amount)>=4500;if(paid){const data=loadData(),user=data.users.find(x=>x.id===req.user.id);user.plan='pro';user.planActivatedAt=new Date().toISOString();saveData(data);}res.json({verified:paid,user:publicUser(loadData().users.find(x=>x.id===req.user.id))});}catch{res.status(502).json({message:'Could not verify payment.'});}
-});
-
-require('./phase2')(app,{auth,loadData,saveData,id,publicUser});
-
-app.get('*',(req,res)=>res.sendFile(path.join(__dirname,'public','index.html')));
-app.listen(PORT,()=>console.log(`Billora running on ${APP_URL}`));
+const express=require('express'),bcrypt=require('bcryptjs'),jwt=require('jsonwebtoken'),crypto=require('crypto'),PDFDocument=require('pdfkit'),nodemailer=require('nodemailer'),db=require('./db');
+const app=express(),PORT=process.env.PORT||3000,APP_URL=process.env.APP_URL||`http://localhost:${PORT}`,JWT_SECRET=process.env.JWT_SECRET||'change-me-in-production',PRO_AMOUNT=Number(process.env.BILLORA_PRO_AMOUNT||4500);
+app.use(express.json({limit:'1mb',verify:(req,res,buf)=>req.rawBody=buf.toString()}));app.use(express.static('public'));
+const id=p=>`${p}_${Date.now()}_${Math.random().toString(36).slice(2,8)}`,pub=u=>({id:u.id,name:u.name,email:u.email,businessName:u.businessName,plan:u.plan,phone:u.phone||'',address:u.address||'',currency:u.currency||'NGN',createdAt:u.createdAt});
+const token=u=>jwt.sign({id:u.id,email:u.email},JWT_SECRET,{expiresIn:'7d'});
+function auth(req,res,next){const h=req.headers.authorization||'',t=h.startsWith('Bearer ')?h.slice(7):null;if(!t)return res.status(401).json({message:'Authentication required.'});try{req.user=jwt.verify(t,JWT_SECRET);next()}catch{return res.status(401).json({message:'Session expired. Please log in again.'})}}
+function mailer(){if(!process.env.SMTP_HOST)return null;return nodemailer.createTransport({host:process.env.SMTP_HOST,port:Number(process.env.SMTP_PORT||587),secure:Number(process.env.SMTP_PORT)===465,auth:{user:process.env.SMTP_USER,pass:process.env.SMTP_PASS}})}
+async function sendMail(to,subject,text){const t=mailer();if(!t)return false;await t.sendMail({from:process.env.SMTP_FROM||'Billora <no-reply@example.com>',to,subject,text});return true}
+function pdf(inv,u,receipt=false){return new Promise((resolve,reject)=>{const d=new PDFDocument({margin:48}),a=[];d.on('data',x=>a.push(x));d.on('end',()=>resolve(Buffer.concat(a)));d.on('error',reject);d.fontSize(24).font('Helvetica-Bold').text(u.businessName||'Billora');d.fontSize(10).font('Helvetica').text(u.address||'');if(u.phone)d.text(u.phone);d.moveDown(2).fontSize(22).font('Helvetica-Bold').text(receipt?'PAYMENT RECEIPT':'INVOICE');d.fontSize(10).font('Helvetica').text(`${inv.number} • ${new Date(inv.createdAt).toLocaleDateString()}`);d.moveDown().fontSize(12).font('Helvetica-Bold').text('Bill to');d.font('Helvetica').text(inv.customerName);if(inv.customerEmail)d.text(inv.customerEmail);d.moveDown().font('Helvetica-Bold').text('Description                 Qty       Price        Total');d.moveDown(.5);inv.items.forEach(i=>d.font('Helvetica').text(`${String(i.description).slice(0,28).padEnd(28)} ${String(i.quantity).padStart(3)}   ${Number(i.price).toLocaleString()}   ${(Number(i.quantity)*Number(i.price)).toLocaleString()}`));d.moveDown().font('Helvetica-Bold').text(`Subtotal: ${Number(inv.subtotal).toLocaleString()} ${u.currency}`);if(Number(inv.vatRate)>0)d.text(`VAT (${inv.vatRate}%): ${(Number(inv.total)-Number(inv.subtotal)).toLocaleString()} ${u.currency}`);d.fontSize(15).text(`TOTAL: ${Number(inv.total).toLocaleString()} ${u.currency}`);d.fontSize(10).font('Helvetica').moveDown().text(`Status: ${inv.status.toUpperCase()}`);if(inv.dueDate)d.text(`Due date: ${inv.dueDate}`);if(inv.notes)d.moveDown().text(inv.notes);d.moveDown(2).text('Generated by Billora.');d.end()})}
+app.get('/api/health',(q,s)=>s.json({ok:true,app:'Billora',database:db.usePg?'postgresql':'json-fallback'}));
+app.post('/api/auth/register',async(req,res)=>{try{const{name,email,password,businessName}=req.body||{};if(!name||!email||!password)return res.status(400).json({message:'Name, email and password are required.'});if(String(password).length<8)return res.status(400).json({message:'Password must be at least 8 characters.'});const e=String(email).trim().toLowerCase();if(await db.getUserByEmail(e))return res.status(409).json({message:'An account with that email already exists.'});const u={id:id('usr'),name:String(name).trim(),email:e,businessName:String(businessName||`${name}'s Business`).trim(),password:await bcrypt.hash(password,10),plan:'free',phone:'',address:'',currency:'NGN',createdAt:new Date().toISOString()};const x=await db.createUser(u);res.status(201).json({token:token(x),user:pub(x)})}catch(e){res.status(500).json({message:e.message})}});
+app.post('/api/auth/login',async(req,res)=>{try{const u=await db.getUserByEmail(String(req.body.email||'').trim().toLowerCase());if(!u||!(await bcrypt.compare(req.body.password||'',u.password)))return res.status(401).json({message:'Invalid email or password.'});res.json({token:token(u),user:pub(u)})}catch(e){res.status(500).json({message:e.message})}});
+app.get('/api/me',auth,async(req,res)=>{const u=await db.getUser(req.user.id);if(!u)return res.status(404).json({message:'User not found.'});res.json(pub(u))});
+app.get('/api/dashboard',auth,async(req,res)=>res.json(await db.dashboard(req.user.id)));app.get('/api/analytics',auth,async(req,res)=>res.json(await db.analytics(req.user.id)));
+app.get('/api/invoices',auth,async(req,res)=>res.json(await db.list('invoices',req.user.id)));
+app.post('/api/invoices',auth,async(req,res)=>{try{const{customerName,customerEmail,items,dueDate,notes,vatRate}=req.body||{};if(!customerName||!Array.isArray(items)||!items.length)return res.status(400).json({message:'Customer and at least one item are required.'});const clean=items.map(i=>({description:String(i.description||'Item').trim(),quantity:Math.max(1,Number(i.quantity)||1),price:Math.max(0,Number(i.price)||0)}));if(clean.some(i=>!i.description||i.price<=0))return res.status(400).json({message:'Each item needs a description and price.'});const subtotal=clean.reduce((s,i)=>s+i.quantity*i.price,0),rate=Math.max(0,Math.min(100,Number(vatRate)||0)),x={id:id('inv'),userId:req.user.id,number:`INV-${String(Date.now()).slice(-8)}`,customerName:String(customerName).trim(),customerEmail:String(customerEmail||'').trim(),items:clean,subtotal,total:subtotal*(1+rate/100),status:'unpaid',dueDate:dueDate||'',notes:String(notes||''),vatRate:rate,createdAt:new Date().toISOString()};res.status(201).json(await db.addInvoice(x))}catch(e){res.status(500).json({message:e.message})}});
+app.patch('/api/invoices/:id',auth,async(req,res)=>{if(!['paid','unpaid','overdue'].includes(req.body.status))return res.status(400).json({message:'Invalid invoice status.'});const x=await db.updateInvoice(req.params.id,req.user.id,req.body.status);if(!x)return res.status(404).json({message:'Invoice not found.'});res.json(x)});
+app.get('/api/invoices/:id/:type',auth,async(req,res)=>{const x=(await db.list('invoices',req.user.id)).find(a=>a.id===req.params.id);if(!x)return res.status(404).end();const u=await db.getUser(req.user.id),b=await pdf(x,u,req.params.type==='receipt');res.set({'Content-Type':'application/pdf','Content-Disposition':`attachment; filename="Billora-${x.number}-${req.params.type}.pdf"`}).send(b)});
+app.get('/api/expenses',auth,async(req,res)=>res.json(await db.list('expenses',req.user.id)));app.post('/api/expenses',auth,async(req,res)=>{const{title,amount,category}=req.body||{};if(!title||Number(amount)<=0)return res.status(400).json({message:'Expense title and a positive amount are required.'});res.status(201).json(await db.addExpense({id:id('exp'),userId:req.user.id,title:String(title).trim(),amount:Number(amount),category:category||'General',createdAt:new Date().toISOString()}))});
+app.get('/api/settings',auth,async(req,res)=>res.json(pub(await db.getUser(req.user.id))));app.patch('/api/settings',auth,async(req,res)=>{const u=await db.getUser(req.user.id);Object.assign(u,{name:String(req.body.name||u.name).trim(),businessName:String(req.body.businessName||u.businessName).trim(),phone:String(req.body.phone||'').trim(),address:String(req.body.address||'').trim(),currency:['NGN','USD','GBP'].includes(req.body.currency)?req.body.currency:'NGN'});res.json(pub(await db.updateUser(u)))});
+app.get('/api/team',auth,async(req,res)=>res.json(await db.list('members',req.user.id)));app.post('/api/team/invite',auth,async(req,res)=>{const{email,role}=req.body||{};if(!email)return res.status(400).json({message:'Team member email is required.'});const x={id:id('mem'),userId:req.user.id,email:String(email).trim().toLowerCase(),role:role==='manager'?'manager':'staff',status:'invited',token:crypto.randomBytes(24).toString('hex'),createdAt:new Date().toISOString()};await db.addMember(x);const u=await db.getUser(req.user.id),link=`${APP_URL}/?team_invite=${x.token}`,sent=await sendMail(x.email,`Invitation to ${u.businessName} on Billora`,`You have been invited to join ${u.businessName} on Billora as ${x.role}. Invitation: ${link}`);res.json({member:{email:x.email,role:x.role,status:x.status},sent,inviteLink:sent?undefined:link})});
+app.get('/api/recurring',auth,async(req,res)=>res.json(await db.getRecurring(req.user.id)));app.post('/api/recurring',auth,async(req,res)=>{const{customerName,customerEmail,items,frequency,nextDate}=req.body||{};if(!customerName||!Array.isArray(items)||!items.length||!nextDate)return res.status(400).json({message:'Customer, items and next date are required.'});if(!['weekly','monthly','quarterly'].includes(frequency))return res.status(400).json({message:'Invalid frequency.'});res.status(201).json(await db.addRecurring({id:id('rec'),userId:req.user.id,customerName,customerEmail:customerEmail||'',items,frequency,nextDate,status:'active',createdAt:new Date().toISOString()}))});
+app.post('/api/reminders/email/:id',auth,async(req,res)=>{const x=(await db.list('invoices',req.user.id)).find(a=>a.id===req.params.id);if(!x||!x.customerEmail)return res.status(404).json({message:'Invoice or customer email not found.'});const u=await db.getUser(req.user.id),ok=await sendMail(x.customerEmail,`Payment reminder — ${x.number} from ${u.businessName}`,`Hello ${x.customerName},\n\nThis is a friendly reminder about invoice ${x.number} for ${Number(x.total).toLocaleString()} ${u.currency}.\n${x.dueDate?`Due date: ${x.dueDate}.\n`:''}\nThank you,\n${u.businessName}`);if(!ok)return res.status(503).json({message:'Email is not configured. Add SMTP settings on the server.'});res.json({sent:true})});
+app.get('/api/reminders/whatsapp/:id',auth,async(req,res)=>{const x=(await db.list('invoices',req.user.id)).find(a=>a.id===req.params.id);if(!x)return res.status(404).json({message:'Invoice not found.'});const u=await db.getUser(req.user.id),msg=`Hello ${x.customerName}, this is a friendly reminder from ${u.businessName} about invoice ${x.number} for ${Number(x.total).toLocaleString()} ${u.currency}.`;res.json({url:`https://wa.me/?text=${encodeURIComponent(msg)}`})});
+app.post('/api/payments/subscribe',auth,async(req,res)=>{const secret=process.env.FLW_SECRET_KEY;if(!secret)return res.status(503).json({message:'Flutterwave is not configured. Add FLW_SECRET_KEY on the server.'});const u=await db.getUser(req.user.id),tx_ref=`BILLORA-${u.id}-${Date.now()}`;try{const r=await fetch('https://api.flutterwave.com/v3/payments',{method:'POST',headers:{Authorization:`Bearer ${secret}`,'Content-Type':'application/json'},body:JSON.stringify({tx_ref,amount:PRO_AMOUNT,currency:'NGN',redirect_url:`${APP_URL}/?payment=complete&tx_ref=${encodeURIComponent(tx_ref)}`,payment_options:'card,banktransfer,ussd',customer:{email:u.email,name:u.name},customizations:{title:'Billora Pro',description:'Billora monthly Pro subscription'}})}),d=await r.json();if(!r.ok||d.status!=='success')return res.status(502).json({message:d.message||'Unable to start payment.'});res.json({link:d.data.link,tx_ref})}catch{res.status(502).json({message:'Flutterwave could not be reached.'})}});
+app.get('/api/payments/verify/:txRef',auth,async(req,res)=>{const secret=process.env.FLW_SECRET_KEY;if(!secret)return res.status(503).json({message:'Flutterwave is not configured.'});try{const r=await fetch(`https://api.flutterwave.com/v3/transactions/verify_by_reference?tx_ref=${encodeURIComponent(req.params.txRef)}`,{headers:{Authorization:`Bearer ${secret}`}}),d=await r.json(),u=await db.getUser(req.user.id),ok=d.status==='success'&&d.data?.status==='successful'&&d.data?.tx_ref===req.params.txRef&&d.data?.currency==='NGN'&&Number(d.data?.amount)>=PRO_AMOUNT;if(ok){u.plan='pro';await db.updateUser(u)}res.json({verified:ok,user:pub(await db.getUser(req.user.id))})}catch{res.status(502).json({message:'Could not verify payment.'})}});
+app.post('/flw-webhook',async(req,res)=>{const sig=req.headers['flutterwave-signature']||req.headers['verif-hash'],secret=process.env.FLW_SECRET_HASH;if(!secret||!sig)return res.status(401).end();let valid=String(sig)===String(secret);if(req.headers['flutterwave-signature'])valid=crypto.createHmac('sha256',secret).update(req.rawBody||'').digest('base64')===sig;if(!valid)return res.status(401).end();const p=req.body||{},eventId=String(p.webhook_id||p.id||p.data?.id||crypto.createHash('sha256').update(req.rawBody||JSON.stringify(p)).digest('hex'));if(!(await db.addPaymentEvent(eventId,p)))return res.sendStatus(200);const d=p.data||{};if((p.type==='charge.completed'||p.event==='charge.completed')&&['successful','succeeded'].includes(d.status)&&d.currency==='NGN'){const tx=d.tx_ref||d.reference||'',m=String(tx).match(/^BILLORA-(.+)-\d+$/);if(m){const u=await db.getUser(m[1]);if(u&&Number(d.amount)>=PRO_AMOUNT){u.plan='pro';await db.updateUser(u)}}}res.sendStatus(200)});
+app.get('*',(req,res)=>res.sendFile(require('path').join(__dirname,'public','index.html')));(async()=>{try{await db.initDb();app.listen(PORT,()=>console.log(`Billora running on ${APP_URL}`))}catch(e){console.error(e);process.exit(1)}})();
